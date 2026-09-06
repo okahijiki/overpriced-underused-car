@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>そのクルマ、本当はどれくらい使われている？</title>
+
+<!-- React -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+
+<!-- Babel Standalone: lets the browser transpile JSX at load time (no build step) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin></script>
+
+<!-- Tailwind Play CDN: generates utility CSS on the fly from the classes used below -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #1B1D21; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+
+
+/* ---------- design tokens ----------
+  background : #1B1D21  (asphalt)
+  surface    : #24272C  (asphalt, one shade up)
+  hairline   : #383B41
+  ink        : #EDEAE2  (concrete white)
+  ink-dim    : #9A9D a3 -> using rgba below
+  line       : #E8B23D  (road-line yellow) — the one accent
+  waste      : #C4573F  (brake-light red) — used only for "not used" states
+  transit    : #5E9080  (bus-teal) — used only for the bus comparison
+------------------------------------ */
+
+const DEFAULTS = {
+  utilPct: 4.2,
+  occupants: 1.3,
+  downRatio: 50,
+  rate: 3,
+  term: 5,
+  busYear: 5000,
+};
+
+const VEHICLE_PRESETS = {
+  compact: {
+    label: "普通車(フィットなど)",
+    price: 2380000,
+    maintenance: 300000,
+    capacity: 5,
+    note: "現行フィット価格帯(約181万〜296万円)の中間目安 約238万円 / 維持費目安30万円・年",
+  },
+  kei: {
+    label: "軽自動車",
+    price: 1960000,
+    maintenance: 250000,
+    capacity: 4,
+    note: "新車平均価格196万円(自工会2025年度調査) / 維持費目安25万円・年",
+  },
+};
+
+const yen = (n) =>
+  Math.round(n).toLocaleString("ja-JP", { maximumFractionDigits: 0 });
+
+function loanMonthly(principal, annualRatePct, years) {
+  const i = annualRatePct / 100 / 12;
+  const n = years * 12;
+  if (n <= 0) return 0;
+  if (i === 0) return principal / n;
+  return (principal * i) / (1 - Math.pow(1 + i, -n));
+}
+
+function Stat({ value, unit, label, tone = "line" }) {
+  const color =
+    tone === "waste" ? "#C4573F" : tone === "transit" ? "#5E9080" : "#E8B23D";
+  return (
+    <div>
+      <div
+        className="font-mono leading-none"
+        style={{ fontSize: "clamp(2.2rem,6vw,3.4rem)", color, fontWeight: 600 }}
+      >
+        {value}
+        <span style={{ fontSize: "0.42em", marginLeft: 4, color: "#9a9d a3" }}>
+          {unit}
+        </span>
+      </div>
+      <div
+        className="mt-1 text-sm"
+        style={{ color: "rgba(237,234,226,0.55)" }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function Slider({ label, value, onChange, min, max, step, format, defaultValue, onReset }) {
+  const isDefault =
+    defaultValue === undefined || Math.abs(value - defaultValue) < 1e-9;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <span className="text-sm flex items-center gap-2" style={{ color: "rgba(237,234,226,0.7)" }}>
+          {label}
+          {!isDefault && (
+            <button
+              type="button"
+              onClick={onReset}
+              className="font-mono text-[11px] px-1.5 py-0.5 rounded-sm"
+              style={{
+                color: "#E8B23D",
+                border: "1px solid rgba(232,178,61,0.5)",
+                lineHeight: 1.4,
+              }}
+              aria-label={`${label}を初期値に戻す`}
+              title={`初期値 ${format ? format(defaultValue) : defaultValue} に戻す`}
+            >
+              ↺ 初期値
+            </button>
+          )}
+        </span>
+        <span className="font-mono text-sm" style={{ color: "#EDEAE2" }}>
+          {format ? format(value) : value}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-full"
+        style={{ accentColor: "#E8B23D" }}
+      />
+    </div>
+  );
+}
+
+function Divider() {
+  return (
+    <div
+      className="w-full my-10 md:my-14"
+      style={{
+        height: 0,
+        borderTop: "3px dashed rgba(232,178,61,0.35)",
+      }}
+    />
+  );
+}
+
+function GroupTitle({ children }) {
+  return (
+    <div className="flex items-center gap-3 mb-8">
+      <div style={{ width: 4, height: 22, background: "#E8B23D", borderRadius: 2, flexShrink: 0 }} />
+      <h2
+        className="jp-serif-head"
+        style={{
+          fontSize: "clamp(1.2rem,3vw,1.45rem)",
+          fontWeight: 700,
+          color: "#EDEAE2",
+        }}
+      >
+        {children}
+      </h2>
+    </div>
+  );
+}
+
+function CarWasteCalculator() {
+  // --- vehicle type ---
+  const [vehicleType, setVehicleType] = useState("compact");
+  const activeDefaults = VEHICLE_PRESETS[vehicleType];
+
+  // --- section 1: utilization over time ---
+  const [utilPct, setUtilPct] = useState(DEFAULTS.utilPct);
+
+  // --- section 2: occupancy ---
+  const [occupants, setOccupants] = useState(DEFAULTS.occupants);
+  const [capacity, setCapacity] = useState(activeDefaults.capacity);
+  const occupancyPct = (occupants / capacity) * 100;
+
+  // --- section 3: combined ---
+  const combinedPct = (utilPct / 100) * (occupancyPct / 100) * 100;
+
+  // --- section 4: cost ---
+  const [price, setPrice] = useState(activeDefaults.price);
+  const [downRatio, setDownRatio] = useState(DEFAULTS.downRatio); // %
+  const [rate, setRate] = useState(DEFAULTS.rate); // %
+  const [term, setTerm] = useState(DEFAULTS.term); // years
+  const [maintenance, setMaintenance] = useState(activeDefaults.maintenance);
+  const [busYear, setBusYear] = useState(DEFAULTS.busYear);
+
+  const applyVehicleType = (type) => {
+    const preset = VEHICLE_PRESETS[type];
+    setVehicleType(type);
+    setPrice(preset.price);
+    setMaintenance(preset.maintenance);
+    setCapacity(preset.capacity);
+    if (occupants > preset.capacity) setOccupants(preset.capacity);
+  };
+
+  const isAnyChanged =
+    utilPct !== DEFAULTS.utilPct ||
+    occupants !== DEFAULTS.occupants ||
+    capacity !== activeDefaults.capacity ||
+    price !== activeDefaults.price ||
+    downRatio !== DEFAULTS.downRatio ||
+    rate !== DEFAULTS.rate ||
+    term !== DEFAULTS.term ||
+    maintenance !== activeDefaults.maintenance ||
+    busYear !== DEFAULTS.busYear;
+
+  const resetAll = () => {
+    setUtilPct(DEFAULTS.utilPct);
+    setOccupants(DEFAULTS.occupants);
+    setCapacity(activeDefaults.capacity);
+    setPrice(activeDefaults.price);
+    setDownRatio(DEFAULTS.downRatio);
+    setRate(DEFAULTS.rate);
+    setTerm(DEFAULTS.term);
+    setMaintenance(activeDefaults.maintenance);
+    setBusYear(DEFAULTS.busYear);
+  };
+
+  const cost = useMemo(() => {
+    const down = price * (downRatio / 100);
+    const loanPrincipal = price - down;
+    const monthly = loanMonthly(loanPrincipal, rate, term);
+    const loanTotal = monthly * term * 12;
+    const totalOverTerm = down + loanTotal + maintenance * term;
+    const annualFull = totalOverTerm / term;
+    const monthlyFull = annualFull / 12;
+    const monthlyCashflow = monthly + maintenance / 12;
+    const multiple = annualFull / busYear;
+    return {
+      down,
+      monthly,
+      loanTotal,
+      annualFull,
+      monthlyFull,
+      monthlyCashflow,
+      multiple,
+    };
+  }, [price, downRatio, rate, term, maintenance, busYear]);
+
+  // grid for the "used vs idle" visualization — 100 cells
+  const usedCells = Math.max(0, Math.min(100, Math.round(combinedPct)));
+
+  return (
+    <div
+      className="w-full min-h-full"
+      style={{
+        background: "#1B1D21",
+        color: "#EDEAE2",
+        fontFamily:
+          "'IBM Plex Sans','Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif",
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+        .jp-serif-head { font-family: 'IBM Plex Sans JP','IBM Plex Sans',sans-serif; }
+        .font-mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+        input[type=range]{ -webkit-appearance:none; height:2px; background:rgba(237,234,226,0.25); border-radius:2px; }
+        input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px;height:14px;border-radius:50%;background:#E8B23D;cursor:pointer;margin-top:-6px; }
+        input[type=range]::-moz-range-thumb{ width:14px;height:14px;border-radius:50%;background:#E8B23D;border:none;cursor:pointer; }
+      `}</style>
+
+      <div className="max-w-3xl mx-auto px-6 py-16 md:py-20">
+        {/* ---------- header ---------- */}
+        <div className="mb-14">
+          <div className="flex items-start justify-between gap-4 mb-3">
+            <div
+              className="text-xs font-mono"
+              style={{ color: "rgba(232,178,61,0.8)" }}
+            >
+              クルマの実質稼働・実質コスト
+            </div>
+            {isAnyChanged && (
+              <button
+                type="button"
+                onClick={resetAll}
+                className="font-mono text-xs px-2.5 py-1 rounded-sm shrink-0"
+                style={{
+                  color: "#1B1D21",
+                  background: "#E8B23D",
+                }}
+              >
+                ↺ すべて初期値に戻す
+              </button>
+            )}
+          </div>
+          <h1
+            className="jp-serif-head"
+            style={{
+              fontSize: "clamp(1.7rem,4.5vw,2.5rem)",
+              fontWeight: 700,
+              lineHeight: 1.4,
+            }}
+          >
+            そのクルマ、
+            <br />
+            本当はどれくらい使われている？
+          </h1>
+          <p
+            className="mt-4 text-sm leading-relaxed"
+            style={{ color: "rgba(237,234,226,0.6)", maxWidth: "34rem" }}
+          >
+            数字を動かして、稼働率・座席利用率・維持コストを自分の実感に合わせて調整できます。
+            初期値は公的統計・業界データに基づく一般的な目安です。各項目の値を変えると
+            「↺ 初期値」ボタンが出て、その項目だけ元に戻せます。
+          </p>
+        </div>
+
+        <GroupTitle>乗車効率</GroupTitle>
+
+        <section>
+          <h2 className="text-sm font-mono mb-6" style={{ color: "rgba(237,234,226,0.5)" }}>
+            1日の稼働率
+          </h2>
+          <Stat value={utilPct.toFixed(1)} unit="%" label="1日のうち、クルマが実際に動いている時間の割合" />
+
+          {/* asphalt gauge */}
+          <div
+            className="relative mt-6 h-10 rounded-sm overflow-hidden"
+            style={{ background: "#0F1013", border: "1px solid #383B41" }}
+          >
+            <div
+              className="h-full transition-all duration-300"
+              style={{ width: `${utilPct}%`, background: "#E8B23D" }}
+            />
+            <div
+              className="absolute inset-0 flex items-center justify-end pr-3 text-xs font-mono"
+              style={{ color: "rgba(237,234,226,0.45)" }}
+            >
+              残り {(100 - utilPct).toFixed(1)}% は駐車中
+            </div>
+          </div>
+
+          <div className="mt-8">
+            <Slider
+              label="稼働率"
+              value={utilPct}
+              onChange={setUtilPct}
+              min={1}
+              max={20}
+              step={0.1}
+              format={(v) => `${v.toFixed(1)}%`}
+              defaultValue={DEFAULTS.utilPct}
+              onReset={() => setUtilPct(DEFAULTS.utilPct)}
+            />
+          </div>
+        </section>
+
+        <Divider />
+
+        {/* ---------- section 2: 座席利用率 ---------- */}
+        <section>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-sm font-mono" style={{ color: "rgba(237,234,226,0.5)" }}>
+              座席利用率
+            </h2>
+            {(occupants !== DEFAULTS.occupants ||
+              capacity !== activeDefaults.capacity) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setOccupants(DEFAULTS.occupants);
+                  setCapacity(activeDefaults.capacity);
+                }}
+                className="font-mono text-[11px] px-1.5 py-0.5 rounded-sm"
+                style={{
+                  color: "#E8B23D",
+                  border: "1px solid rgba(232,178,61,0.5)",
+                  lineHeight: 1.4,
+                }}
+                aria-label="座席利用率を初期値に戻す"
+                title={`初期値 平均${DEFAULTS.occupants}人 / 定員${activeDefaults.capacity}人 に戻す`}
+              >
+                ↺ 初期値
+              </button>
+            )}
+          </div>
+          <Stat
+            value={occupancyPct.toFixed(1)}
+            unit="%"
+            label={`定員 ${capacity}人のうち、平均 ${occupants} 人しか乗っていない`}
+          />
+
+          {/* seat icons */}
+          <div
+            className="flex gap-2 mt-6 flex-wrap p-2 -m-2 rounded-sm"
+            style={{
+              outline:
+                occupants !== DEFAULTS.occupants ||
+                capacity !== activeDefaults.capacity
+                  ? "1px dashed rgba(232,178,61,0.4)"
+                  : "1px dashed transparent",
+              outlineOffset: "2px",
+            }}
+          >
+            {Array.from({ length: Math.round(capacity) }).map((_, i) => {
+              const filled = i < Math.round(occupants);
+              return (
+                <div
+                  key={i}
+                  className="w-9 h-9 rounded-sm flex items-center justify-center text-xs font-mono"
+                  style={{
+                    background: filled ? "#E8B23D" : "#0F1013",
+                    border: `1px solid ${filled ? "#E8B23D" : "#383B41"}`,
+                    color: filled ? "#1B1D21" : "rgba(237,234,226,0.3)",
+                  }}
+                >
+                  {filled ? "人" : "―"}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+            <Slider
+              label="平均乗車人数"
+              value={occupants}
+              onChange={setOccupants}
+              min={1}
+              max={capacity}
+              step={0.1}
+              format={(v) => `${v.toFixed(1)}人`}
+              defaultValue={DEFAULTS.occupants}
+              onReset={() => setOccupants(DEFAULTS.occupants)}
+            />
+            <Slider
+              label="乗車定員"
+              value={capacity}
+              onChange={(v) => {
+                setCapacity(v);
+                if (occupants > v) setOccupants(v);
+              }}
+              min={2}
+              max={7}
+              step={1}
+              format={(v) => `${v}人`}
+              defaultValue={activeDefaults.capacity}
+              onReset={() => setCapacity(activeDefaults.capacity)}
+            />
+          </div>
+        </section>
+
+        <Divider />
+
+        {/* ---------- section 3: 総合効率 ---------- */}
+        <section>
+          <h2 className="text-sm font-mono mb-6" style={{ color: "rgba(237,234,226,0.5)" }}>
+            乗車効率
+          </h2>
+          <Stat
+            value={combinedPct.toFixed(2)}
+            unit="%"
+            label="稼働率 × 座席利用率。この割合だけが「実際に使われている」部分"
+            tone="waste"
+          />
+
+          {/* 10x10 grid */}
+          <div
+            className="grid mt-6"
+            style={{
+              gridTemplateColumns: "repeat(20, 1fr)",
+              gap: "3px",
+            }}
+          >
+            {Array.from({ length: 100 }).map((_, i) => (
+              <div
+                key={i}
+                className="aspect-square rounded-[1px]"
+                style={{
+                  background: i < usedCells ? "#E8B23D" : "#0F1013",
+                  border: "1px solid #2c2f35",
+                }}
+              />
+            ))}
+          </div>
+          <p className="mt-4 text-xs" style={{ color: "rgba(237,234,226,0.4)" }}>
+            100マス中 {usedCells} マスが「使われている座席×時間」、残りは駐車または空席
+          </p>
+        </section>
+
+        <Divider />
+
+        {/* ---------- section 4: コスト ---------- */}
+        <GroupTitle>クルマ vs 路線バス</GroupTitle>
+
+        <div className="mb-12">
+          <div className="flex gap-2">
+            {Object.entries(VEHICLE_PRESETS).map(([key, preset]) => {
+              const active = vehicleType === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => applyVehicleType(key)}
+                  className="flex-1 text-left px-4 py-3 rounded-sm text-sm"
+                  style={{
+                    background: active ? "#E8B23D" : "#24272C",
+                    color: active ? "#1B1D21" : "#EDEAE2",
+                    border: `1px solid ${active ? "#E8B23D" : "#383B41"}`,
+                    fontWeight: active ? 600 : 400,
+                  }}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-xs" style={{ color: "rgba(237,234,226,0.4)" }}>
+            {activeDefaults.note}
+          </p>
+        </div>
+
+        <section>
+          <h2 className="text-sm font-mono mb-6" style={{ color: "rgba(237,234,226,0.5)" }}>
+            維持コスト vs. 路線バス
+          </h2>
+
+          {price === 0 && (
+            <div
+              className="mb-6 px-4 py-3 rounded-sm text-sm"
+              style={{
+                background: "rgba(94,144,128,0.12)",
+                border: "1px solid rgba(94,144,128,0.4)",
+                color: "#EDEAE2",
+              }}
+            >
+              車両価格が0円 ＝ <strong>クルマを買わない場合</strong>の試算になっています。
+              バスや徒歩だけで生活するケースと比較できます。
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 mb-10">
+            <Stat value={yen(cost.monthlyFull)} unit="円/月" label="車の実質月額(頭金を含む総コストの月割り)" />
+            <Stat value={`×${cost.multiple.toFixed(0)}`} unit="" label="路線バス年間費用との倍率差" tone="transit" />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+            <Slider
+              label="車両価格"
+              value={price}
+              onChange={setPrice}
+              min={0}
+              max={5500000}
+              step={10000}
+              format={(v) => `${yen(v / 10000)}万円`}
+              defaultValue={activeDefaults.price}
+              onReset={() => setPrice(activeDefaults.price)}
+            />
+            <Slider
+              label="頭金の割合(半クレ=50%)"
+              value={downRatio}
+              onChange={setDownRatio}
+              min={0}
+              max={100}
+              step={5}
+              format={(v) => `${v}%`}
+              defaultValue={DEFAULTS.downRatio}
+              onReset={() => setDownRatio(DEFAULTS.downRatio)}
+            />
+            <Slider
+              label="ローン金利"
+              value={rate}
+              onChange={setRate}
+              min={0.5}
+              max={8}
+              step={0.1}
+              format={(v) => `年${v.toFixed(1)}%`}
+              defaultValue={DEFAULTS.rate}
+              onReset={() => setRate(DEFAULTS.rate)}
+            />
+            <Slider
+              label="ローン期間"
+              value={term}
+              onChange={setTerm}
+              min={1}
+              max={10}
+              step={1}
+              format={(v) => `${v}年`}
+              defaultValue={DEFAULTS.term}
+              onReset={() => setTerm(DEFAULTS.term)}
+            />
+            <Slider
+              label="年間維持費(税・保険・燃料など)"
+              value={maintenance}
+              onChange={setMaintenance}
+              min={0}
+              max={500000}
+              step={10000}
+              format={(v) => `${yen(v / 10000)}万円`}
+              defaultValue={activeDefaults.maintenance}
+              onReset={() => setMaintenance(activeDefaults.maintenance)}
+            />
+            <Slider
+              label="路線バスの年間費用"
+              value={busYear}
+              onChange={setBusYear}
+              min={0}
+              max={100000}
+              step={1000}
+              format={(v) => `${yen(v)}円`}
+              defaultValue={DEFAULTS.busYear}
+              onReset={() => setBusYear(DEFAULTS.busYear)}
+            />
+          </div>
+
+          <div
+            className="mt-10 p-5 rounded-sm text-sm leading-relaxed"
+            style={{ background: "#24272C", border: "1px solid #383B41" }}
+          >
+            <div className="font-mono text-xs mb-2" style={{ color: "rgba(232,178,61,0.8)" }}>
+              内訳
+            </div>
+            <div className="grid grid-cols-2 gap-y-1" style={{ color: "rgba(237,234,226,0.75)" }}>
+              <span>頭金</span>
+              <span className="font-mono text-right">{yen(cost.down)}円</span>
+              <span>ローン月額</span>
+              <span className="font-mono text-right">{yen(cost.monthly)}円/月</span>
+              <span>ローン総返済額</span>
+              <span className="font-mono text-right">{yen(cost.loanTotal)}円</span>
+              <span>実際の毎月の出費(頭金は別払い済み)</span>
+              <span className="font-mono text-right">{yen(cost.monthlyCashflow)}円/月</span>
+            </div>
+          </div>
+        </section>
+
+        <Divider />
+
+        {/* ---------- footer summary ---------- */}
+        <section className="pb-4">
+          <div
+            className="p-6 md:p-8 rounded-sm"
+            style={{ background: "#24272C", border: "1px solid #383B41" }}
+          >
+            <p className="text-sm leading-relaxed mb-6" style={{ color: "rgba(237,234,226,0.55)" }}>
+              稼働率 <span className="font-mono" style={{ color: "#E8B23D" }}>{utilPct.toFixed(1)}%</span> ×
+              座席利用率 <span className="font-mono" style={{ color: "#E8B23D" }}>{occupancyPct.toFixed(1)}%</span> ＝
+              下記の「乗車効率」。維持コストは下記の倍率で路線バスを上回る。
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
+              <Stat
+                value={combinedPct.toFixed(2)}
+                unit="%"
+                label="乗車効率"
+                tone="waste"
+              />
+              <Stat
+                value={`約${cost.multiple.toFixed(0)}`}
+                unit="倍"
+                label="年間コストは路線バスの"
+                tone="transit"
+              />
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<CarWasteCalculator />);
+</script>
+</body>
+</html>
