@@ -10,8 +10,8 @@ enegaeru.comによる独自算出2%の平均値<br>
 https://www.enegaeru.com/realityofprivatepassengercarutilizationrateof5<br>
 
 #### 平均乗車人数(1.3人): <br>
-国土交通省「全国道路・街路交通情勢調査 自動車起終点調査」平成27年度(1.31人)<br>
-https://www.e-stat.go.jp/stat-search?page=1&bunya_l=10&toukei=00600580&layout=dataset<br>
+国土交通省「全国道路・街路交通情勢調査 自動車起終点調査」令和３年度(1.31人)<br>
+https://www.e-stat.go.jp/stat-search/files?stat_infid=000040170610<br>
 
 #### 車両価格
 フィット価格(238万円): 現行モデル(2026年7月改良)の価格帯(約181万〜296万円)の中間値<br>
